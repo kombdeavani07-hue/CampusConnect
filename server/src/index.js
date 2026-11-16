@@ -22,10 +22,17 @@ app.disable('x-powered-by');
 app.use(helmet());
 
 const clientOrigin = getClientOrigin();
-const origins = new Set([clientOrigin]);
+// Check the current Wi-Fi address for every mutation, not only at startup.
 console.log('Open CampusConnect on this Wi-Fi: ' + clientOrigin);
 app.use((req,res,next) => {
-  if (!['GET','HEAD','OPTIONS'].includes(req.method) && req.headers.origin && !origins.has(req.headers.origin)) return res.status(403).json({error:'This request origin is not allowed.'});
+  if (!['GET','HEAD','OPTIONS'].includes(req.method) && req.headers.origin) {
+    let currentOrigin;
+    try { currentOrigin = getClientOrigin(); }
+    catch { return res.status(503).json({error:'No active Wi-Fi address was found. Reconnect Wi-Fi and restart CampusConnect.'}); }
+    if (req.headers.origin !== currentOrigin) {
+      return res.status(403).json({error:'This page uses a different website address. Open ' + currentOrigin + ' and try again.'});
+    }
+  }
   next();
 });
 app.use('/api', rateLimit({windowMs:60_000,limit:300,standardHeaders:'draft-8',legacyHeaders:false,message:{error:'Too many requests. Please wait a minute.'}}));
