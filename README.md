@@ -29,7 +29,7 @@ Use the Student, Company, and Admin buttons on the sign-in screen, or sign in ma
 | Student | student@campusconnect.local |
 | Approved company | company@campusconnect.local |
 | Placement administrator | admin@campusconnect.local |
-| Company awaiting approval | pending@campusconnect.local |
+| Additional company | pending@campusconnect.local |
 
 These are local demonstration accounts. Production deployment would require replacing demo credentials and configuring HTTPS, secret management, backups, and account recovery.
 
@@ -43,7 +43,7 @@ These are local demonstration accounts. Production deployment would require repl
 6. Sign in as Student, open Offers, and accept the offer.
 7. Sign in as Admin to see the placed-student total and filter/export Placement reports.
 
-For a new account, register as a student or company. The administrator must verify the student or approve the company before it can apply or post. Admins can also add students and edit their academic records. Companies can edit their own jobs; admins can edit all jobs. Eligibility criteria become fixed after the first application.
+For a new account, register as a student or company. The administrator verifies students before they can apply. Company accounts can post jobs and manage their own recruitment workflow without administrator approval. Admins can also add students and edit their academic records. Companies can edit their own jobs; admins can edit all jobs. Eligibility criteria become fixed after the first application.
 
 ## Folder map
 

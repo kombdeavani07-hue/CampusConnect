@@ -19,8 +19,7 @@ CREATE TABLE IF NOT EXISTS companies (
   company_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   user_id INTEGER NOT NULL UNIQUE REFERENCES users(user_id),
   company_name VARCHAR(150) NOT NULL,
-  website TEXT NOT NULL DEFAULT '',
-  approval_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (approval_status IN ('pending','approved','rejected'))
+  website TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS jobs (
   job_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

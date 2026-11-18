@@ -32,6 +32,10 @@ try{
   check((await call('/career/me')).status===401,'Anonymous career profile access blocked');
   const initialCareer=await call('/career/me','GET',undefined,student.cookie);
   check(initialCareer.status===200&&initialCareer.body.skills.length===0,'New student starts with an empty career profile');
+  const broadProfile={skills:[{name:'SolidWorks',proficiency:'advanced'},{name:'PLC Programming',proficiency:'beginner'}],interests:['Mechanical Design','Electrical Power Systems','Electronics & Telecommunication'],preferred_roles:['Mechanical Design Engineer','Electrical Engineer','Embedded Systems Engineer']};
+  check((await call('/career/me','PUT',broadProfile,student.cookie)).status===200,'Career profiles accept core engineering skills, domains, and roles');
+  const broadSaved=(await call('/career/me','GET',undefined,student.cookie)).body;
+  check(broadSaved.skills.some(row=>row.name==='SolidWorks')&&broadSaved.preferred_roles.some(row=>row.name==='Electrical Engineer'),'Core engineering career choices persist');
   const careerInput={skills:[{name:'Python',proficiency:'advanced'},{name:'SQL',proficiency:'intermediate'}],interests:['Data Science','Web Development'],preferred_roles:['Data Analyst','Backend Developer']};
   check((await call('/career/me','PUT',careerInput,student.cookie)).status===200,'Student saves multiple skills, domains, and preferred roles');
   let career=(await call('/career/me','GET',undefined,student.cookie)).body;
@@ -44,8 +48,8 @@ try{
   const certificateResult=await call('/career/certifications','POST',certInput,student.cookie);
   check(certificateResult.status===201&&certificateResult.body.certification.has_document,'Certificate larger than the normal JSON limit uploads successfully');
   const certId=certificateResult.body.certification.certification_id;
-  const anotherCertificate=await call('/career/certifications','POST',{course_name:'Python Essentials',issuer:'Verification Academy',credential_url:'https://example.org/python'},student.cookie);
-  check(anotherCertificate.status===201&&!anotherCertificate.body.certification.has_document,'Multiple certification records support link-only entries');
+  const anotherCertificate=await call('/career/certifications','POST',{course_name:'PLC & SCADA',issuer:'Verification Academy',credential_url:'https://example.org/python'},student.cookie);
+  check(anotherCertificate.status===201&&!anotherCertificate.body.certification.has_document,'Core engineering certifications support link-only entries');
   const secondCertId=anotherCertificate.body.certification.certification_id;
   const ownDocument=await fetch('http://127.0.0.1:4000/api/career/certifications/'+certId+'/document',{headers:{cookie:student.cookie}});
   check(ownDocument.status===200&&Buffer.from(await ownDocument.arrayBuffer()).equals(documentBytes)&&ownDocument.headers.get('content-disposition').startsWith('attachment;'),'Student downloads exact stored document bytes as an attachment');
@@ -68,12 +72,12 @@ try{
   check(career.certifications.length===2&&!JSON.stringify(career).includes('password_hash')&&!career.certifications[0].document,'Profile responses include metadata without password hashes or document blobs');
 
   const jobInput={job_title:'Verification Graduate Engineer',description:'An automated verification role with database-backed application checks.',location:'Bengaluru',salary:800000,min_cgpa:7,eligible_branches:['Computer Science'],preferred_skills:['Python','SQL'],deadline:new Date(Date.now()+86400000*15).toISOString().slice(0,10)};
-  check((await call('/jobs','POST',jobInput,company.cookie)).status===403,'Unapproved company cannot publish');
+  
   const companyData=(await call('/dashboard','GET',undefined,company.cookie)).body;
   const outsiderData=(await call('/dashboard','GET',undefined,outsider.cookie)).body;
-  check((await call(`/companies/${companyData.company.company_id}/approval`,'PATCH',{status:'approved'},student.cookie)).status===403,'Student cannot approve companies');
-  check((await call(`/companies/${companyData.company.company_id}/approval`,'PATCH',{status:'approved'},admin)).status===200,'Admin approves company');
-  check((await call('/jobs','POST',jobInput,company.cookie)).status===201,'Approved company publishes job');
+  check((await call(`/companies/${companyData.company.company_id}/approval`,'PATCH',{status:'approved'},student.cookie)).status===404,'Company approval endpoint removed for students');
+  check((await call(`/companies/${companyData.company.company_id}/approval`,'PATCH',{status:'approved'},admin)).status===404,'Company approval endpoint removed for admins');
+  check((await call('/jobs','POST',jobInput,company.cookie)).status===201,'New company publishes job without admin approval');
   let companyBoard=(await call('/dashboard','GET',undefined,company.cookie)).body;
   check(Array.isArray(companyBoard.jobs),'Recruiter dashboard query succeeds');
   const job=companyBoard.jobs.find(row=>row.job_title===jobInput.job_title);

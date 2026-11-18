@@ -21,7 +21,7 @@ try {
   await db.query("INSERT INTO students(user_id,roll_number,branch,graduation_year,cgpa,verified) VALUES ($1,'CS2023001','Computer Science',2027,8.6,TRUE),($2,'EC2023002','Electronics',2027,8.1,TRUE) ON CONFLICT(user_id) DO NOTHING", [student,student2]);
   const company = await account('Neha Kapoor', 'company@campusconnect.local', 'company');
   const pending = await account('Vikram Das', 'pending@campusconnect.local', 'company');
-  await db.query("INSERT INTO companies(user_id,company_name,website,approval_status) VALUES ($1,'Northstar Technologies','https://example.com','approved'),($2,'Vertex Labs','https://example.org','pending') ON CONFLICT(user_id) DO NOTHING", [company,pending]);
+  await db.query("INSERT INTO companies(user_id,company_name,website) VALUES ($1,'Northstar Technologies','https://example.com'),($2,'Vertex Labs','https://example.org') ON CONFLICT(user_id) DO NOTHING", [company,pending]);
   const c = (await db.query('SELECT company_id FROM companies WHERE user_id=$1', [company])).rows[0].company_id;
   const jobCount = await db.query('SELECT COUNT(*) FROM jobs WHERE company_id=$1', [c]);
   if (Number(jobCount.rows[0].count) === 0) {

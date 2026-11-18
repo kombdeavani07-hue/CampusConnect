@@ -112,11 +112,11 @@ app.get('/api/dashboard',auth,async(req,res)=>{
   const user=req.user;
   const student=user.role==='student'?(await db.query('SELECT * FROM students WHERE user_id=$1',[user.user_id])).rows[0]:null;
   const company=user.role==='company'?(await db.query('SELECT * FROM companies WHERE user_id=$1',[user.user_id])).rows[0]:null;
-  const jobs=(await db.query(`SELECT j.*,c.company_name,c.approval_status,COUNT(a.application_id)::int AS applicant_count, COALESCE((SELECT array_agg(k.name ORDER BY lower(k.name)) FROM job_skills jk JOIN skills k USING(skill_id) WHERE jk.job_id=j.job_id), ARRAY[]::text[]) AS preferred_skills
+  const jobs=(await db.query(`SELECT j.*,c.company_name,COUNT(a.application_id)::int AS applicant_count, COALESCE((SELECT array_agg(k.name ORDER BY lower(k.name)) FROM job_skills jk JOIN skills k USING(skill_id) WHERE jk.job_id=j.job_id), ARRAY[]::text[]) AS preferred_skills
     FROM jobs j JOIN companies c USING(company_id) LEFT JOIN applications a USING(job_id)
-    WHERE ($1='admin') OR ($1='company' AND c.user_id=$2) OR ($1='student' AND c.approval_status='approved')
+    WHERE ($1='admin') OR ($1='company' AND c.user_id=$2) OR ($1='student')
     GROUP BY j.job_id,c.company_id ORDER BY j.created_at DESC,j.job_id`,[user.role,user.user_id])).rows;
-  const applications=(await db.query(`SELECT a.*,j.job_title,j.salary,c.company_name,u.full_name,s.roll_number,s.branch,s.cgpa,s.graduation_year
+  const applications=(await db.query(`SELECT a.*,j.job_title,j.salary,c.company_name,u.full_name,u.email,s.roll_number,s.branch,s.cgpa,s.graduation_year
     FROM applications a JOIN jobs j USING(job_id) JOIN companies c USING(company_id)
     JOIN students s USING(student_id) JOIN users u ON u.user_id=s.user_id
     WHERE $1='admin' OR ($1='company' AND c.user_id=$2) OR ($1='student' AND s.user_id=$2)
@@ -136,8 +136,8 @@ app.get('/api/dashboard',auth,async(req,res)=>{
   const notifications=(await db.query('SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC,notification_id DESC LIMIT 30',[user.user_id])).rows;
   const totals=user.role==='admin'?(await db.query(`SELECT
     (SELECT COUNT(*)::int FROM students) AS students,
-    (SELECT COUNT(*)::int FROM companies WHERE approval_status='approved') AS companies,
-    (SELECT COUNT(*)::int FROM jobs j JOIN companies c USING(company_id) WHERE j.status='open' AND j.deadline>=CURRENT_DATE AND c.approval_status='approved') AS active_jobs,
+    (SELECT COUNT(*)::int FROM companies) AS companies,
+    (SELECT COUNT(*)::int FROM jobs j JOIN companies c USING(company_id) WHERE j.status='open' AND j.deadline>=CURRENT_DATE) AS active_jobs,
     (SELECT COUNT(DISTINCT a.student_id)::int FROM offers o JOIN applications a USING(application_id) WHERE o.status='accepted') AS placed_students`)).rows[0]:null;
   const career_summary=student?{skills:(await db.query('SELECT k.name FROM student_skills sk JOIN skills k USING(skill_id) WHERE sk.student_id=$1',[student.student_id])).rows.map(item=>item.name)}:null;
   res.json({user,student,company,jobs,applications,interviews,offers,students,companies,notifications,totals,career_summary});
@@ -168,20 +168,12 @@ app.patch('/api/students/:id/verify',auth,role('admin'),async(req,res)=>{
     await notify(connection,result.rows[0].user_id,verified?'Your academic profile has been verified. You can apply to eligible jobs.':'Your academic profile needs verification. Please contact the placement cell.');
   }); res.json({ok:true});
 });
-app.patch('/api/companies/:id/approval',auth,role('admin'),async(req,res)=>{
-  const status=z.object({status:z.enum(['approved','rejected','pending'])}).parse(req.body).status;
-  await transaction(async connection=>{
-    const result=await connection.query('UPDATE companies SET approval_status=$1 WHERE company_id=$2 RETURNING user_id',[status,id.parse(req.params.id)]);
-    if(!result.rowCount) fail(404,'Company not found.');
-    await notify(connection,result.rows[0].user_id,`Your company approval status is now ${status}.`);
-  }); res.json({ok:true});
-});
 const jobSchema=z.object({job_title:z.string().trim().min(3).max(150),description:z.string().trim().min(20).max(5000),location:name,min_cgpa:cgpa,salary:z.coerce.number().positive().max(9999999999),eligible_branches:z.array(name).max(20).default([]),deadline:date,preferred_skills:z.array(z.string().trim().min(2).max(80)).max(30).default([])});
 app.post('/api/jobs',auth,role('company'),async(req,res)=>{
   const input=jobSchema.parse(req.body);
   await transaction(async connection=>{
     const company=(await connection.query('SELECT * FROM companies WHERE user_id=$1 FOR UPDATE',[req.user.user_id])).rows[0];
-    if(company?.approval_status!=='approved') fail(403,'Your company must be approved before posting jobs.');
+    if(!company) fail(404,'Company profile not found.');
     const today=(await connection.query('SELECT CURRENT_DATE::text AS today')).rows[0].today;
     if(input.deadline<today) fail(400,'The application deadline must be today or later.');
     const created=(await connection.query('INSERT INTO jobs(company_id,job_title,description,location,min_cgpa,salary,eligible_branches,deadline) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING job_id',[company.company_id,input.job_title,input.description,input.location,input.min_cgpa,input.salary,input.eligible_branches,input.deadline])).rows[0];
@@ -191,9 +183,9 @@ app.post('/api/jobs',auth,role('company'),async(req,res)=>{
 app.patch('/api/jobs/:id',auth,role('admin','company'),async(req,res)=>{
   const input=jobSchema.parse(req.body);
   await transaction(async connection=>{
-    const job=(await connection.query(`SELECT j.*,c.user_id AS owner,c.approval_status FROM jobs j JOIN companies c USING(company_id) WHERE job_id=$1 FOR UPDATE OF j,c`,[id.parse(req.params.id)])).rows[0];
+    const job=(await connection.query(`SELECT j.*,c.user_id AS owner FROM jobs j JOIN companies c USING(company_id) WHERE job_id=$1 FOR UPDATE OF j,c`,[id.parse(req.params.id)])).rows[0];
     if(!job)fail(404,'Job not found.');
-    if(req.user.role!=='admin'&&(job.owner!==req.user.user_id||job.approval_status!=='approved'))fail(403,'You cannot edit this job.');
+    if(req.user.role!=='admin'&&job.owner!==req.user.user_id)fail(403,'You cannot edit this job.');
     const today=(await connection.query('SELECT CURRENT_DATE::text AS today')).rows[0].today;
     if(input.deadline<today)fail(400,'Choose a current or future deadline. Close or cancel an expired role instead.');
     const applied=await connection.query('SELECT 1 FROM applications WHERE job_id=$1 LIMIT 1',[job.job_id]);
@@ -204,7 +196,7 @@ app.patch('/api/jobs/:id',auth,role('admin','company'),async(req,res)=>{
 });
 app.patch('/api/jobs/:id/status',auth,role('admin','company'),async(req,res)=>{
   const status=z.object({status:z.enum(['open','closed','cancelled'])}).parse(req.body).status;
-  const result=await db.query(`UPDATE jobs j SET status=$1 FROM companies c WHERE j.company_id=c.company_id AND j.job_id=$2 AND ($3='admin' OR (c.user_id=$4 AND c.approval_status='approved')) RETURNING j.job_id`,[status,id.parse(req.params.id),req.user.role,req.user.user_id]);
+  const result=await db.query(`UPDATE jobs j SET status=$1 FROM companies c WHERE j.company_id=c.company_id AND j.job_id=$2 AND ($3='admin' OR (c.user_id=$4)) RETURNING j.job_id`,[status,id.parse(req.params.id),req.user.role,req.user.user_id]);
   if(!result.rowCount) fail(403,'Job not found or you cannot manage it.');
   res.json({ok:true});
 });
@@ -212,9 +204,9 @@ app.post('/api/jobs/:id/apply',auth,role('student'),async(req,res)=>{
   await transaction(async connection=>{
     const student=(await connection.query('SELECT * FROM students WHERE user_id=$1 FOR UPDATE',[req.user.user_id])).rows[0];
     if(!student?.verified) fail(403,'The placement cell must verify your profile before you can apply.');
-    const job=(await connection.query(`SELECT j.*,c.approval_status,c.user_id AS company_user_id,j.deadline>=CURRENT_DATE AS in_time FROM jobs j JOIN companies c USING(company_id) WHERE job_id=$1 FOR UPDATE OF j,c`,[id.parse(req.params.id)])).rows[0];
+    const job=(await connection.query(`SELECT j.*,c.user_id AS company_user_id,j.deadline>=CURRENT_DATE AS in_time FROM jobs j JOIN companies c USING(company_id) WHERE job_id=$1 FOR UPDATE OF j,c`,[id.parse(req.params.id)])).rows[0];
     if(!job) fail(404,'Job not found.');
-    if(job.status!=='open'||!job.in_time||job.approval_status!=='approved') fail(400,'This job is no longer accepting applications.');
+    if(job.status!=='open'||!job.in_time) fail(400,'This job is no longer accepting applications.');
     if(Number(student.cgpa)<Number(job.min_cgpa)) fail(400,'Your CGPA does not meet this job’s requirement.');
     if(job.eligible_branches.length&&!job.eligible_branches.includes(student.branch)) fail(400,'Your branch is not eligible for this job.');
     await connection.query('INSERT INTO applications(student_id,job_id) VALUES($1,$2)',[student.student_id,job.job_id]);
