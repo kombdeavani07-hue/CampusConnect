@@ -9,19 +9,37 @@ await db.connect();
 const suffix=randomBytes(6).toString('hex');
 const accounts=[];
 let checks=0;
+let invitationAdmin;
 function check(condition,label){assert.ok(condition,label);checks++;console.log(`PASS ${label}`);}
 async function call(path,method='GET',body,cookie=''){
   const response=await fetch(`http://127.0.0.1:4000/api${path}`,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),...(cookie?{cookie}:{})},body:body?JSON.stringify(body):undefined});
   return {status:response.status,body:await response.json(),cookie:response.headers.get('set-cookie')?.split(';')[0]};
 }
-async function register(role,label,extra){const result=await call('/auth/register','POST',{role,full_name:`Verification ${label}`,email:`verify-${label}-${suffix}@example.com`,password:'Verify@123',...extra});check(result.status===201,`${role} registration (${label})`);accounts.push(result.body.user.user_id);return result;}
+async function register(role,label,extra){if(role==='company'){if(!invitationAdmin)invitationAdmin=(await call('/auth/login','POST',{email:'admin@campusconnect.local',password:'Campus@123'})).cookie;const invitation=await call('/company-invitations','POST',{email:`verify-${label}-${suffix}@example.com`,company_name:extra.company_name},invitationAdmin);check(invitation.status===201,'Admin creates company invitation');extra={...extra,invitation_code:invitation.body.token};}const result=await call('/auth/register','POST',{role,full_name:`Verification ${label}`,email:`verify-${label}-${suffix}@example.com`,password:'Verify@123',...extra});check(result.status===201,`${role} registration (${label})`);accounts.push(result.body.user.user_id);return result;}
 try{
   check((await call('/health')).body.ok,'API and PostgreSQL health');
   check((await call('/dashboard')).status===401,'Anonymous access blocked');
+  check((await call('/auth/register','POST',{role:'company',full_name:'Uninvited Company',email:'uninvited-'+suffix+'@example.com',password:'Verify@123',company_name:'Uninvited'})).status===400,'Company registration requires invitation code');
   const forged=await call('/auth/register','POST',{role:'admin',full_name:'Invalid Admin',email:`verify-forged-${suffix}@example.com`,password:'Verify@123'});
   check(forged.status===400,'Public admin registration blocked');
   const admin=(await call('/auth/login','POST',{email:'admin@campusconnect.local',password:'Campus@123'})).cookie;
   check(!!admin,'Admin login');
+  invitationAdmin=admin;
+  const inviteEmail='invite-only-'+suffix+'@example.com';
+  check((await call('/company-invitations','POST',{email:inviteEmail,company_name:'Invited Company'})).status===401,'Anonymous users cannot invite companies');
+  const single=await call('/company-invitations','POST',{email:inviteEmail,company_name:'Invited Company'},admin);
+  const invitedBody={role:'company',full_name:'Invited Recruiter',email:inviteEmail,password:'Verify@123',company_name:'Invited Company',invitation_code:single.body.token};
+  check((await call('/auth/register','POST',{...invitedBody,email:'wrong-'+suffix+'@example.com'})).status===403,'Invitation is bound to recruiter email');
+  check((await call('/auth/register','POST',{...invitedBody,company_name:'Wrong Company'})).status===400,'Invitation is bound to company name');
+  await db.query("UPDATE company_invitations SET expires_at=NOW()-INTERVAL '1 day' WHERE invitation_id=$1",[single.body.invitation.invitation_id]);
+  check((await call('/auth/register','POST',invitedBody)).status===403,'Expired invitation cannot register');
+  await db.query("UPDATE company_invitations SET expires_at=NOW()+INTERVAL '1 day' WHERE invitation_id=$1",[single.body.invitation.invitation_id]);
+  const invitedAccount=await call('/auth/register','POST',invitedBody);
+  check(invitedAccount.status===201,'Valid invitation creates company account');accounts.push(invitedAccount.body.user.user_id);
+  check((await call('/auth/register','POST',invitedBody)).status===403,'Used invitation cannot be replayed');
+  const revoked=await call('/company-invitations','POST',{email:'revoked-'+suffix+'@example.com',company_name:'Revoked Company'},admin);
+  check((await call('/company-invitations/'+revoked.body.invitation.invitation_id,'DELETE',undefined,admin)).status===200,'Admin revokes unused invitation');
+  check((await call('/auth/register','POST',{...invitedBody,email:'revoked-'+suffix+'@example.com',company_name:'Revoked Company',invitation_code:revoked.body.token})).status===403,'Revoked invitation cannot register');
   const createdEmail=`verify-admin-added-${suffix}@example.com`;
   check((await call('/students','POST',{full_name:'Admin Added Student',email:createdEmail,password:'Verify@123',roll_number:`VA-${suffix}`,branch:'Electronics',graduation_year:2027,cgpa:8},admin)).status===201,'Admin creates verified student account');
   accounts.push((await db.query('SELECT user_id FROM users WHERE email=$1',[createdEmail])).rows[0].user_id);
@@ -44,6 +62,11 @@ try{
   check((await call('/career/me','PUT',{...careerInput,skills:[{name:'Python',proficiency:'advanced'},{name:'python',proficiency:'beginner'}]},student.cookie)).status===400,'Case-insensitive duplicate skills rejected');
   check((await call('/career/me','PUT',careerInput,company.cookie)).status===403,'Company cannot edit a student career profile');
   const documentBytes=Buffer.concat([Buffer.from('%PDF-1.4\n'),Buffer.alloc(45000,32),Buffer.from('\n%%EOF')]);
+  check((await call('/career/resume','PUT',{name:'resume.pdf',type:'application/pdf',data:documentBytes.toString('base64')},student.cookie)).status===200,'Student uploads PDF resume');
+  check((await call('/career/resume','PUT',{name:'bad.pdf',type:'application/pdf',data:Buffer.from('invalid').toString('base64')},student.cookie)).status===400,'Invalid resume signature rejected');
+  const resumeStudent=(await call('/career/me','GET',undefined,student.cookie)).body.student.student_id;
+  const deniedResume=await fetch('http://127.0.0.1:4000/api/career/students/'+resumeStudent+'/resume',{headers:{cookie:company.cookie}});
+  check(deniedResume.status===404,'Recruiter cannot download resume before an application');
   const certInput={course_name:'Database Fundamentals',issuer:'Verification Academy',completed_on:'2024-06-15',credential_id:'DB-2024',credential_url:'https://example.com/certificate',document:{name:'database-certificate.pdf',type:'application/pdf',data:documentBytes.toString('base64')}};
   const certificateResult=await call('/career/certifications','POST',certInput,student.cookie);
   check(certificateResult.status===201&&certificateResult.body.certification.has_document,'Certificate larger than the normal JSON limit uploads successfully');
@@ -71,7 +94,7 @@ try{
   career=(await call('/career/me','GET',undefined,student.cookie)).body;
   check(career.certifications.length===2&&!JSON.stringify(career).includes('password_hash')&&!career.certifications[0].document,'Profile responses include metadata without password hashes or document blobs');
 
-  const jobInput={job_title:'Verification Graduate Engineer',description:'An automated verification role with database-backed application checks.',location:'Bengaluru',salary:800000,min_cgpa:7,eligible_branches:['Computer Science'],preferred_skills:['Python','SQL'],deadline:new Date(Date.now()+86400000*15).toISOString().slice(0,10)};
+  const jobInput={drive_date:new Date(Date.now()+86400000*20).toISOString().slice(0,10),drive_venue:'Main campus auditorium',selection_rounds:'Aptitude, technical, HR',drive_instructions:'Bring your resume and college ID.',job_title:'Verification Graduate Engineer',description:'An automated verification role with database-backed application checks.',location:'Bengaluru',salary:800000,min_cgpa:7,eligible_branches:['Computer Science'],preferred_skills:['Python','SQL'],deadline:new Date(Date.now()+86400000*15).toISOString().slice(0,10)};
   
   const companyData=(await call('/dashboard','GET',undefined,company.cookie)).body;
   const outsiderData=(await call('/dashboard','GET',undefined,outsider.cookie)).body;
@@ -82,6 +105,7 @@ try{
   check(Array.isArray(companyBoard.jobs),'Recruiter dashboard query succeeds');
   const job=companyBoard.jobs.find(row=>row.job_title===jobInput.job_title);
   check(!!job,'Created job is visible to owner');
+  check(job.drive_venue===jobInput.drive_venue&&job.selection_rounds===jobInput.selection_rounds,'Placement drive details persist');
   check(job.preferred_skills.length===2&&job.preferred_skills.includes('Python'),'Recruiter job skill tags persist');
   check((await call(`/jobs/${job.job_id}`,'PATCH',{...jobInput,description:'Updated role description with a clear focus on PostgreSQL and web development.'},company.cookie)).status===200,'Owner edits job details');
   check((await call(`/jobs/${job.job_id}`,'PATCH',jobInput,outsider.cookie)).status===403,'Other company cannot edit job details');
@@ -101,7 +125,21 @@ try{
   const attempts=await Promise.all([call(`/jobs/${job.job_id}/apply`,'POST',{},student.cookie),call(`/jobs/${job.job_id}/apply`,'POST',{},student.cookie)]);
   check(attempts.map(result=>result.status).sort().join(',')==='201,409','Concurrent duplicate applications produce exactly one record');
   check((await call(`/jobs/${job.job_id}`,'PATCH',{...jobInput,min_cgpa:9},company.cookie)).status===409,'Eligibility cannot change after an application');
-  companyBoard=(await call('/dashboard','GET',undefined,company.cookie)).body;
+  
+  const listed=await call('/applicants?page_size=1&skill=Python&min_cgpa=8&graduation_year=2027&job_id='+job.job_id,'GET',undefined,company.cookie);
+  check(listed.status===200&&listed.body.total===1&&listed.body.rows.length===1,'Recruiter gets filtered paginated applicants');
+  check((await call('/applicants?skill=NoSuchSkill','GET',undefined,company.cookie)).body.total===0,'Skill filter excludes nonmatching applicants');
+  check((await call('/applicants?job_id='+job.job_id,'GET',undefined,outsider.cookie)).body.total===0,'Other company cannot list applicants by guessing job ID');
+  check((await call('/applicants','GET',undefined,student.cookie)).status===403,'Student cannot use recruiter list');
+  const exported=await fetch('http://127.0.0.1:4000/api/applicants/export?job_id='+job.job_id,{headers:{cookie:company.cookie}});
+  check(exported.status===200&&(await exported.text()).includes('Verified Student'),'Applicant CSV export includes authorized matching student');
+  const deniedExport=await fetch('http://127.0.0.1:4000/api/applicants/export?job_id='+job.job_id,{headers:{cookie:outsider.cookie}});
+  check(!(await deniedExport.text()).includes('Verified Student'),'Applicant CSV excludes other company students');
+  const resumeDownload=await fetch('http://127.0.0.1:4000/api/career/students/'+studentData.student.student_id+'/resume',{headers:{cookie:company.cookie}});
+  check(resumeDownload.status===200&&Buffer.from(await resumeDownload.arrayBuffer()).equals(documentBytes),'Authorized recruiter downloads exact resume bytes');
+  check((await call('/student-directory?page_size=1','GET',undefined,admin)).body.rows.length===1,'Admin student directory is paginated');
+  check((await call('/student-directory','GET',undefined,company.cookie)).status===403,'Company cannot browse college student directory');
+companyBoard=(await call('/dashboard','GET',undefined,company.cookie)).body;
   const application=companyBoard.applications.find(row=>row.job_id===job.job_id);
   check(!!application,'Recruiter sees own applicant');
   check((await call('/career/students/'+initialCareer.body.student.student_id,'GET',undefined,company.cookie)).status===200,'Recruiter can view applicant career profile after application');
@@ -155,6 +193,7 @@ try{
       await db.query('DELETE FROM companies WHERE user_id=ANY($1::int[])',[ids]);
       await db.query('DELETE FROM users WHERE user_id=ANY($1::int[])',[ids]);
       await db.query('COMMIT');
+      await db.query('DELETE FROM company_invitations WHERE email LIKE $1',['%'+suffix+'@example.com']);
       console.log('Temporary verification records removed; demo records preserved.');
     }catch(error){await db.query('ROLLBACK');throw error;}
   }

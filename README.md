@@ -27,7 +27,7 @@ Use the Student, Company, and Admin buttons on the sign-in screen, or sign in ma
 | Role | Email |
 | --- | --- |
 | Student | student@campusconnect.local |
-| Approved company | company@campusconnect.local |
+| Invited company | company@campusconnect.local |
 | Placement administrator | admin@campusconnect.local |
 | Additional company | pending@campusconnect.local |
 
@@ -43,7 +43,7 @@ These are local demonstration accounts. Production deployment would require repl
 6. Sign in as Student, open Offers, and accept the offer.
 7. Sign in as Admin to see the placed-student total and filter/export Placement reports.
 
-For a new account, register as a student or company. The administrator verifies students before they can apply. Company accounts can post jobs and manage their own recruitment workflow without administrator approval. Admins can also add students and edit their academic records. Companies can edit their own jobs; admins can edit all jobs. Eligibility criteria become fixed after the first application.
+Students can register directly. New company accounts require an invitation code from the placement administrator. The administrator verifies students before they can apply. Company accounts can post jobs and manage their own recruitment workflow without administrator approval. Admins can also add students and edit their academic records. Companies can edit their own jobs; admins can edit all jobs. Eligibility criteria become fixed after the first application.
 
 ## Folder map
 
@@ -103,3 +103,31 @@ Add up to 50 certifications with a course name, issuer, optional completion date
 Recruiters can choose View career profile from an application to their own job; they can read that student’s skills, interests, role preferences, and certifications, and download the certificate files. Administrators can open any student’s career profile. Other students and unrelated recruiters cannot access those profiles or files. Recruiters see the current saved career profile, not an immutable application-time snapshot.
 
 Job forms support optional relevant skill tags. Student opportunity cards show how many listed skills match their own profile. Skill tags are recommendations; branch, CGPA, verification, deadline, and job status remain the mandatory application rules.
+
+
+## Recruitment improvements
+
+- New company accounts require an admin-created invitation, tied to the recruiter email and company name, valid for 7 days and usable once. Existing company accounts remain active. Admins create/revoke invitations under Companies. Share the code manually; automatic email delivery is not configured.
+- Students upload one PDF resume (maximum 5 MB) under My profile. Admins and recruiters with an application from that student can download it from the career profile. Student resumes and certification files remain private in PostgreSQL.
+- Skills, domains, and roles default to the student's engineering branch. Students can show all engineering suggestions or enter custom values.
+- Applications have server-side job, status, branch, graduation year, minimum CGPA, and skill filters. CSV exports contain all matching applications, not just the current page. Student and applicant directories load 20 records per page. Non-student dashboard application previews load only the latest 5 records.
+- Job forms include optional drive date, venue, selection rounds, and instructions; students see these on the job card.
+- The current offer policy still allows further applications after accepting an offer. Change this only after the college specifies its policy.
+
+## Backup and restore
+
+With PostgreSQL running, run from the project root:
+
+~~~powershell
+npm.cmd run db:backup
+~~~
+
+This creates a custom-format PostgreSQL backup including student records, certificates, and resumes under .local/backups (excluded from Git). Copy the backup to a private external location for protection against disk loss.
+
+Restore into a NEW database for inspection:
+
+~~~powershell
+npm.cmd run db:restore -- "C:/path/to/campusconnect-backup.dump" campusconnect_restore_test
+~~~
+
+The restore refuses existing target databases and never overwrites the live database. Inspect the restored database in pgAdmin before deciding whether to switch the app's DATABASE_URL. Backups are manual, not scheduled.

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { registerCareerRoutes, saveJobSkills } from './career.js';
+import { registerRecruitmentRoutes, tokenHash } from './recruitment.js';
 import { getClientOrigin } from '../../scripts/network.mjs';
 
 dotenv.config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
@@ -82,6 +83,7 @@ async function ownedApplication(connection,applicationId,user) {
 registerCareerRoutes(app,{db,auth,role,transaction,fail,id});
 app.use(express.json({ limit: '30kb' }));
 
+registerRecruitmentRoutes(app,{db,auth,role,fail,id});
 app.get('/api/health',async(req,res)=>{ await db.query('SELECT 1'); res.json({ok:true,database:'connected'}); });
 app.post('/api/auth/login',loginLimit,async(req,res)=>{
   const input=z.object({email,password:z.string().min(1).max(200)}).parse(req.body);
@@ -97,10 +99,18 @@ app.post('/api/auth/register',loginLimit,async(req,res)=>{
     : z.object({company_name:z.string().trim().min(2).max(150),website:z.union([z.literal(''),z.url().max(300).refine(value=>/^https?:\/\//.test(value),'Use an HTTP or HTTPS website.')]).default('')}).parse(req.body);
   const hash=await bcrypt.hash(base.password,12);
   const user=await transaction(async connection=>{
+    let invitation;
+    if(base.role==='company'){
+      const token=z.string().regex(/^[a-f0-9]{64}$/,'Enter the invitation code supplied by your placement cell.').parse(req.body.invitation_code);
+      invitation=(await connection.query('SELECT * FROM company_invitations WHERE token_hash=$1 FOR UPDATE',[tokenHash(token)])).rows[0];
+      if(!invitation||invitation.email!==base.email||invitation.used_at||invitation.revoked_at||new Date(invitation.expires_at)<=new Date())fail(403,'This invitation is invalid, expired, already used, or belongs to a different email.');
+      if(invitation.company_name!==details.company_name)fail(400,'Use the company name provided on your invitation.');
+    }
     const row=(await connection.query('INSERT INTO users(full_name,email,password_hash,role) VALUES($1,$2,$3,$4) RETURNING user_id,full_name,email,role',[base.full_name,base.email,hash,base.role])).rows[0];
     if(base.role==='student') await connection.query('INSERT INTO students(user_id,roll_number,branch,graduation_year,cgpa) VALUES($1,$2,$3,$4,$5)',[row.user_id,details.roll_number,details.branch,details.graduation_year,details.cgpa]);
     else await connection.query('INSERT INTO companies(user_id,company_name,website) VALUES($1,$2,$3)',[row.user_id,details.company_name,details.website]);
-    await notify(connection,row.user_id,'Welcome! Your account is waiting for placement cell verification.');
+    if(invitation)await connection.query('UPDATE company_invitations SET used_at=NOW() WHERE invitation_id=$1',[invitation.invitation_id]);
+    await notify(connection,row.user_id,base.role==='student'?'Welcome! Your account is waiting for placement cell verification.':'Welcome! Your company workspace is ready.');
     return row;
   });
   session(res,user); res.status(201).json({user});
@@ -120,7 +130,7 @@ app.get('/api/dashboard',auth,async(req,res)=>{
     FROM applications a JOIN jobs j USING(job_id) JOIN companies c USING(company_id)
     JOIN students s USING(student_id) JOIN users u ON u.user_id=s.user_id
     WHERE $1='admin' OR ($1='company' AND c.user_id=$2) OR ($1='student' AND s.user_id=$2)
-    ORDER BY a.applied_at DESC,a.application_id DESC`,[user.role,user.user_id])).rows;
+    ORDER BY a.applied_at DESC,a.application_id DESC LIMIT CASE WHEN $1='student' THEN NULL ELSE 5 END`,[user.role,user.user_id])).rows;
   const interviews=(await db.query(`SELECT i.*,j.job_title,c.company_name,u.full_name,a.status AS application_status
     FROM interviews i JOIN applications a USING(application_id) JOIN jobs j USING(job_id) JOIN companies c USING(company_id)
     JOIN students s USING(student_id) JOIN users u ON u.user_id=s.user_id
@@ -131,16 +141,19 @@ app.get('/api/dashboard',auth,async(req,res)=>{
     JOIN students s USING(student_id) JOIN users u ON u.user_id=s.user_id
     WHERE $1='admin' OR ($1='company' AND c.user_id=$2) OR ($1='student' AND s.user_id=$2)
     ORDER BY o.offer_date DESC,o.offer_id DESC`,[user.role,user.user_id])).rows;
-  const students=user.role==='admin'?(await db.query('SELECT s.*,u.full_name,u.email FROM students s JOIN users u USING(user_id) ORDER BY s.student_id DESC')).rows:[];
+  const students=user.role==='admin'?(await db.query('SELECT s.*,u.full_name,u.email FROM students s JOIN users u USING(user_id) ORDER BY s.student_id DESC LIMIT 5')).rows:[];
   const companies=user.role==='admin'?(await db.query('SELECT c.*,u.full_name,u.email FROM companies c JOIN users u USING(user_id) ORDER BY c.company_id DESC')).rows:[];
   const notifications=(await db.query('SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC,notification_id DESC LIMIT 30',[user.user_id])).rows;
   const totals=user.role==='admin'?(await db.query(`SELECT
     (SELECT COUNT(*)::int FROM students) AS students,
+    (SELECT COUNT(*)::int FROM students WHERE verified=FALSE) AS unverified_students,
     (SELECT COUNT(*)::int FROM companies) AS companies,
     (SELECT COUNT(*)::int FROM jobs j JOIN companies c USING(company_id) WHERE j.status='open' AND j.deadline>=CURRENT_DATE) AS active_jobs,
     (SELECT COUNT(DISTINCT a.student_id)::int FROM offers o JOIN applications a USING(application_id) WHERE o.status='accepted') AS placed_students`)).rows[0]:null;
+  const application_count=Number((await db.query("SELECT COUNT(*) FROM applications a JOIN jobs j USING(job_id) JOIN companies c USING(company_id) JOIN students s USING(student_id) WHERE $1='admin' OR ($1='company' AND c.user_id=$2) OR ($1='student' AND s.user_id=$2)",[user.role,user.user_id])).rows[0].count);
+  const student_filter_options=user.role==='admin'?{branches:(await db.query('SELECT DISTINCT branch FROM students ORDER BY branch')).rows.map(r=>r.branch),years:(await db.query('SELECT DISTINCT graduation_year FROM students ORDER BY graduation_year')).rows.map(r=>r.graduation_year)}:null;
   const career_summary=student?{skills:(await db.query('SELECT k.name FROM student_skills sk JOIN skills k USING(skill_id) WHERE sk.student_id=$1',[student.student_id])).rows.map(item=>item.name)}:null;
-  res.json({user,student,company,jobs,applications,interviews,offers,students,companies,notifications,totals,career_summary});
+  res.json({user,student,company,jobs,applications,interviews,offers,students,companies,notifications,totals,career_summary,application_count,student_filter_options});
 });
 app.post('/api/students',auth,role('admin'),async(req,res)=>{
   const input=z.object({full_name:name,email,password,roll_number:z.string().trim().min(2).max(30),branch:name,graduation_year:year,cgpa}).parse(req.body);
@@ -168,7 +181,7 @@ app.patch('/api/students/:id/verify',auth,role('admin'),async(req,res)=>{
     await notify(connection,result.rows[0].user_id,verified?'Your academic profile has been verified. You can apply to eligible jobs.':'Your academic profile needs verification. Please contact the placement cell.');
   }); res.json({ok:true});
 });
-const jobSchema=z.object({job_title:z.string().trim().min(3).max(150),description:z.string().trim().min(20).max(5000),location:name,min_cgpa:cgpa,salary:z.coerce.number().positive().max(9999999999),eligible_branches:z.array(name).max(20).default([]),deadline:date,preferred_skills:z.array(z.string().trim().min(2).max(80)).max(30).default([])});
+const jobSchema=z.object({job_title:z.string().trim().min(3).max(150),description:z.string().trim().min(20).max(5000),location:name,min_cgpa:cgpa,salary:z.coerce.number().positive().max(9999999999),eligible_branches:z.array(name).max(20).default([]),deadline:date,drive_date:date.nullable().default(null),drive_venue:z.string().trim().max(200).default(''),selection_rounds:z.string().trim().max(1000).default(''),drive_instructions:z.string().trim().max(3000).default(''),preferred_skills:z.array(z.string().trim().min(2).max(80)).max(30).default([])});
 app.post('/api/jobs',auth,role('company'),async(req,res)=>{
   const input=jobSchema.parse(req.body);
   await transaction(async connection=>{
@@ -177,6 +190,7 @@ app.post('/api/jobs',auth,role('company'),async(req,res)=>{
     const today=(await connection.query('SELECT CURRENT_DATE::text AS today')).rows[0].today;
     if(input.deadline<today) fail(400,'The application deadline must be today or later.');
     const created=(await connection.query('INSERT INTO jobs(company_id,job_title,description,location,min_cgpa,salary,eligible_branches,deadline) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING job_id',[company.company_id,input.job_title,input.description,input.location,input.min_cgpa,input.salary,input.eligible_branches,input.deadline])).rows[0];
+    await connection.query('UPDATE jobs SET drive_date=$1,drive_venue=$2,selection_rounds=$3,drive_instructions=$4 WHERE job_id=$5',[input.drive_date,input.drive_venue,input.selection_rounds,input.drive_instructions,created.job_id]);
     await saveJobSkills(connection,created.job_id,input.preferred_skills);
   });res.status(201).json({ok:true});
 });
@@ -191,6 +205,7 @@ app.patch('/api/jobs/:id',auth,role('admin','company'),async(req,res)=>{
     const applied=await connection.query('SELECT 1 FROM applications WHERE job_id=$1 LIMIT 1',[job.job_id]);
     if(applied.rowCount&&(Number(job.min_cgpa)!==input.min_cgpa||JSON.stringify([...job.eligible_branches].sort())!==JSON.stringify([...input.eligible_branches].sort())))fail(409,'Eligibility cannot change after students have applied.');
     await connection.query('UPDATE jobs SET job_title=$1,description=$2,location=$3,min_cgpa=$4,salary=$5,eligible_branches=$6,deadline=$7 WHERE job_id=$8',[input.job_title,input.description,input.location,input.min_cgpa,input.salary,input.eligible_branches,input.deadline,job.job_id]);
+    await connection.query('UPDATE jobs SET drive_date=$1,drive_venue=$2,selection_rounds=$3,drive_instructions=$4 WHERE job_id=$5',[input.drive_date,input.drive_venue,input.selection_rounds,input.drive_instructions,job.job_id]);
     await saveJobSkills(connection,job.job_id,input.preferred_skills);
   });res.json({ok:true});
 });

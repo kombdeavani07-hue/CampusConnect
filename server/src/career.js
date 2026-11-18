@@ -69,11 +69,26 @@ export function registerCareerRoutes(app,{db,auth,role,transaction,fail,id}) {
       const interests=(await connection.query('SELECT d.domain_id,d.name FROM student_interests si JOIN domains d USING(domain_id) WHERE si.student_id=$1 ORDER BY lower(d.name)',[studentId])).rows;
       const preferred_roles=(await connection.query('SELECT r.role_id,r.name FROM student_job_preferences sp JOIN job_roles r USING(role_id) WHERE sp.student_id=$1 ORDER BY lower(r.name)',[studentId])).rows;
       const certifications=(await connection.query(`SELECT ${certColumns} FROM certifications WHERE student_id=$1 ORDER BY completed_on DESC NULLS LAST,certification_id DESC`,[studentId])).rows;
-      return {student,skills,interests,preferred_roles,certifications};
+      const resume=(await connection.query('SELECT document_name,updated_at FROM student_resumes WHERE student_id=$1',[studentId])).rows[0]||null;
+      return {student,skills,interests,preferred_roles,certifications,resume};
     });
   }
   router.get('/me',role('student'),async(req,res)=>res.json(await profile(await ownStudent(db,req.user),req.user)));
   router.get('/students/:id',async(req,res)=>res.json(await profile(id.parse(req.params.id),req.user)));
+  router.put('/resume',role('student'),async(req,res)=>{
+    const input=z.object({name:z.string().trim().min(1).max(200),type:z.literal('application/pdf'),data:z.string().min(4).max(6990508)}).parse(req.body);
+    const document=decodeDocument(input,fail);
+    const studentId=await ownStudent(db,req.user);
+    await db.query('INSERT INTO student_resumes(student_id,document,document_name) VALUES($1,$2,$3) ON CONFLICT(student_id) DO UPDATE SET document=EXCLUDED.document,document_name=EXCLUDED.document_name,updated_at=NOW()',[studentId,document.bytes,document.name]);
+    res.json({ok:true});
+  });
+  router.delete('/resume',role('student'),async(req,res)=>{await db.query('DELETE FROM student_resumes WHERE student_id=$1',[await ownStudent(db,req.user)]);res.json({ok:true});});
+  router.get('/students/:id/resume',async(req,res)=>{
+    const studentId=id.parse(req.params.id);await permittedStudent(db,studentId,req.user);
+    const row=(await db.query('SELECT document,document_name FROM student_resumes WHERE student_id=$1',[studentId])).rows[0];
+    if(!row)fail(404,'No resume has been uploaded.');
+    res.set('Content-Type','application/pdf').set('Cache-Control','private, no-store').set('Content-Disposition',"attachment; filename=resume.pdf; filename*=UTF-8''"+encodeURIComponent(row.document_name).replace(/'/g,'%27')).send(row.document);
+  });
   router.put('/me',role('student'),async(req,res)=>{
     const input=profileSchema.parse(req.body);
     const unique=items=>new Set(items.map(value=>value.toLowerCase())).size===items.length;

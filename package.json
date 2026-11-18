@@ -6,7 +6,9 @@
     "setup": "npm --prefix server run db:start && npm --prefix server run db:init",
     "dev": "npm run setup && concurrently -k -n API,WEB \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
     "verify": "npm --prefix server run verify",
-    "build": "npm --prefix client run build"
+    "build": "npm --prefix client run build",
+    "db:backup": "node server/scripts/backup.mjs create",
+    "db:restore": "node server/scripts/backup.mjs restore"
   },
   "devDependencies": {
     "concurrently": "^10.0.6"

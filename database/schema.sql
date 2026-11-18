@@ -128,3 +128,28 @@ CREATE TABLE IF NOT EXISTS job_skills (
   skill_id INTEGER NOT NULL REFERENCES skills(skill_id),
   PRIMARY KEY (job_id,skill_id)
 );
+-- Additive recruitment improvements; existing accounts and applications are preserved.
+CREATE TABLE IF NOT EXISTS company_invitations (
+  invitation_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  email VARCHAR(254) NOT NULL,
+  company_name VARCHAR(150) NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_by INTEGER NOT NULL REFERENCES users(user_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '7 days',
+  used_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS student_resumes (
+  student_id INTEGER PRIMARY KEY REFERENCES students(student_id) ON DELETE CASCADE,
+  document BYTEA NOT NULL CHECK (octet_length(document) BETWEEN 1 AND 5242880),
+  document_name VARCHAR(200) NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS drive_date DATE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS drive_venue VARCHAR(200) NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS selection_rounds VARCHAR(1000) NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS drive_instructions VARCHAR(3000) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS applications_job_status_idx ON applications(job_id,status,application_id);
+CREATE INDEX IF NOT EXISTS students_cohort_idx ON students(branch,graduation_year,student_id);
+CREATE INDEX IF NOT EXISTS invitations_email_idx ON company_invitations(email);
